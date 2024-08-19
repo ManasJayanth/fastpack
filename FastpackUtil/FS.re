@@ -1,5 +1,5 @@
 let stat_option = path =>
-  try%lwt (
+  try%lwt(
     {
       let%lwt stat = Lwt_unix.stat(path);
       Lwt.return_some(stat);
@@ -48,7 +48,7 @@ let rec makedirs = dir =>
   };
 
 let try_dir = dir =>
-  try%lwt (
+  try%lwt(
     {
       let%lwt stat = Lwt_unix.stat(dir);
       switch (stat.st_kind) {
@@ -71,12 +71,8 @@ let is_text_file = filename =>
 let isatty = channel => {
   let forceTTY =
     switch (Sys.getenv_opt("FPACK_FORCE_TTY")) {
-    | Some("false") =>
-      Pastel.(setMode(Disabled));
-      false;
-    | Some("true") =>
-      Pastel.(setMode(Terminal));
-      true;
+    | Some("false") => false
+    | Some("true") => true
     | _ => false
     };
 

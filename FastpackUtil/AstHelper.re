@@ -1,5 +1,5 @@
-module Ast = Flow_parser.Flow_ast;
-module Loc = Flow_parser.Loc;
+module Ast = Flow_ast;
+module Loc = Loc;
 module S = Ast.Statement;
 module E = Ast.Expression;
 module L = Ast.Literal;
