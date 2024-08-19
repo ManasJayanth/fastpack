@@ -1,0 +1,71 @@
+{
+  "name": "fastpack",
+  "version": "0.9.2",
+  "description": "Pack JS code fast & easy.",
+  "main": "index.js",
+  "esy": {
+    "build": [
+      "dune build"
+    ],
+    "install": [
+      "esy-installer Fastpack.install"
+    ],
+    "buildsInSource": "_build"
+  },
+  "directories": {
+    "example": "example",
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "postinstall": "opencollective-postinstall"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fastpack/fastpack.git"
+  },
+  "author": [
+    "Oleksiy Golovko <alexei.golovko@gmail.com>",
+    "Andrey Popp <8mayday@gmail.com> (http://andreypopp.com/)"
+  ],
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/fastpack/fastpack/issues"
+  },
+  "homepage": "https://github.com/fastpack/fastpack#readme",
+  "dependencies": {
+    "@opam/reason": "*",
+    "@fastpack/flow_parser": "0.81.0",
+    "@opam/base": "*",
+    "@opam/sedlex": "*",
+    "@opam/cmdliner": "*",
+    "@opam/containers": "*",
+    "@opam/dune": "*",
+    "@opam/fileutils": "*",
+    "@opam/fmt": "*",
+    "@opam/logs": "*",
+    "@opam/lwt": "*",
+    "@opam/lwt_ppx": "*",
+    "@opam/merlin": "*",
+    "@opam/ppx_deriving": "*",
+    "@opam/ppx_expect": "*",
+    "@opam/ppx_let": "*",
+    "@opam/re": "*",
+    "@opam/sequence": "*",
+    "@opam/utop": "*",
+    "@opam/wtf8": "*",
+    "@opam/yojson": "*",
+    "@reason-native/pastel": "^0.2.1",
+    "chalk": "^2.4.1",
+    "fs-extra": "^7.0.0",
+    "loader-runner": "^2.3.1",
+    "ocaml": "4.14.0",
+    "opencollective-postinstall": "^2.0.2",
+    "refmterr": "*",
+    "opencollective": "^1.0.3"
+  },
+  "collective": {
+    "type": "opencollective",
+    "url": "https://opencollective.com/fastpack"
+  }
+}
