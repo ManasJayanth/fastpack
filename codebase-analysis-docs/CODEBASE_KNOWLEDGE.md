@@ -3,9 +3,12 @@
 > A complete "brain dump" of the fastpack repository, intended to let another engineer or LLM
 > implement features, fix bugs, and refactor safely without re-deriving the architecture.
 >
-> Analyzed at commit `173e0a4` ("bump version", v0.9.2). All paths are relative to the repo root.
+> Analyzed at commit `173e0a4` ("bump version", v0.9.2); pass 3 verified against repo head
+> `23b29a3` (docs-only merge — source unchanged). All paths are relative to the repo root.
 > Supplemental files: [`assets/architecture.mmd`](assets/architecture.mmd),
-> [`assets/build-sequence.mmd`](assets/build-sequence.mmd), [`assets/FILE_INDEX.md`](assets/FILE_INDEX.md).
+> [`assets/build-sequence.mmd`](assets/build-sequence.mmd),
+> [`assets/FILE_INDEX.md`](assets/FILE_INDEX.md),
+> [`assets/TEST_FIXTURES.md`](assets/TEST_FIXTURES.md).
 
 ---
 
@@ -198,11 +201,11 @@ Config.term (Config.re)            CLI args ⊕ fastpack.json ⊕ defaults → C
 - **Modules-as-components**: each `Fastpack/*.re` file is one component; `.rei` files exist for
   the modules with stable public surfaces (`DependencyGraph.rei`, `Worker.rei`, `Config.rei`,
   `Cache.rei`, `FSCache.rei`, `Bundle.rei`, `Preprocessor.rei`, `Resolver.rei`, `Package.rei`).
-- **Two AST traversal frameworks** in `FastpackUtil/`:
+- **Two AST traversal frameworks** in `FastpackUtil/` (full contracts incl. blind spots: §5.7):
   - `Visit.re` — read-only visitor with `Continue/Break` actions and a parent stack
     (`AstParentStack.re`). Used by `Scope.re` and `Worker.analyze` (analysis + side-effect patches).
   - `AstMapper.re` — rewriting mapper (statement → list of statements, etc.) that tracks scope
-    and calls `modifyTree(true)` when anything changes. Used by the four builtin transpilers.
+    and signals modification via `Loc.none` on returned nodes. Used by the four builtin transpilers.
 - **Patch-don't-print**: source rewriting is expressed as `Workspace` patches keyed by parser
   offsets; the original text is preserved wherever unchanged.
 - **Result monads with context** (`Run`, `RunAsync`) + `ppx_let` `let%bind` for the resolver.
@@ -481,12 +484,24 @@ actually modified the AST (otherwise the original source string is reused, §3.5
 - Parenthesization uses an explicit precedence table (`Printer.Parens.precedence`, `:49-120`,
   adapted from the MDN operator-precedence table with documented tweaks: arrow functions bind
   loosest, sequences always parenthesized, function expressions rank 18 to allow IIFEs).
-- **Unsupported nodes raise an internal error** (`ie(…)` → `Error.ie`, a `failwith`):
-  nullish coalescing, optional call/member, generators/comprehensions, `TypeCast`, `MetaProperty`
-  (`new.target`), JSX `Fragment`/`SpreadChild` (in some positions), class `PrivateField`, and all
-  Flow `declare`/`interface`/`type`-alias statements (`:708-721`) — the latter are normally removed
-  by `StripFlow` before printing. Practical consequence: if you add a transpiler (or reorder the
-  pipeline so `StripFlow` doesn't run first), the printer is the component most likely to crash.
+- **Unsupported nodes raise an internal error** (`ie(…)` → `Error.ie`, a `failwith`) —
+  corrected inventory after a full read of the emit bodies (pass 3):
+  `Comprehension`/`Generator` (`:976-977`), `TypeCast` (`:991`), `MetaProperty` (`new.target`,
+  `:992`), class `PrivateField` (`:1152`), JSX `Fragment`/`SpreadChild` **in child position**
+  (`:1018-1020`), and all Flow `declare`/`interface`/`type`-alias statements (`:707-721`) — the
+  latter are normally removed by `StripFlow` before printing. Practical consequence: if you add
+  a transpiler (or reorder the pipeline so `StripFlow` doesn't run first), the printer is the
+  component most likely to crash.
+- Three cases do **not** crash, contrary to what you might assume from the parser flags:
+  nullish coalescing prints correctly (`E.Logical.NullishCoalesce` → `" ?? "`, `:911`); a JSX
+  fragment in *expression* position prints as `<>…</>` (`:984-989`); and — the dangerous one —
+  `E.OptionalCall`/`E.OptionalMember` share the plain `Call`/`Member` emit branches
+  (`:934-935`, `:946-947`), so `a?.b()` would be printed as `a.b()`: the `?.` is **silently
+  dropped**, a semantic change rather than an error. All three are unreachable today (the
+  parser rejects `??`/`?.`, §3.6 parser options), but enabling those parser flags without
+  fixing the printer would mis-compile instead of crash.
+- Minor output quirk: decorators are printed parenthesized — `@(expr)` (`emit_decorator`,
+  `:1257-1262`).
 
 ### 3.7 Caching (two layers)
 
@@ -598,13 +613,18 @@ with provenance. Error rendering details in §2.4.
   transpiler (`Transpile*.ml`), watch utilities (`Watch.ml`). Run: `make test`; re-record:
   `make train` (dune promote).
 - **Integration snapshot tests** (`test/<case>/`, runner `scripts/test.js`, run via
-  `make test-integration`, re-record `make train-integration [pattern=…]`): each case has a
-  `dev.test.js` exporting `({bundle}) => bundle("fpack --dev index.js …")`; the runner executes
+  `make test-integration`, re-record `make train-integration [pattern=…]`): the runner picks up
+  any `test/<case>/*.test.js` (`scripts/test.js:337`), each exporting a function over helpers —
+  `({bundle})` (snapshot output + emitted bundle), `({error})` (expect non-zero exit), or
+  `({stdout})`; the runner executes
   the built `_build/default/bin/fpack.exe` with `-o` into `.sandbox/`, normalizes absolute
   paths to `/...`, writes `stdout.txt`/`stderr.txt` + the emitted bundle, and `git diff
   --no-index`es against the committed `dev/` (or `prod/`) snapshot dir. Fixtures each have
   their own `package.json`/`yarn.lock` installed by `scripts/setupTest.js`. Platform skips at
   the top of `scripts/test.js` (`pack-less` on win32; `error-resolve-case-sensitive` on Linux).
+  A **per-fixture catalog of what each test pins down** — including which fixtures are legacy
+  bash-harness leftovers that the current runner never executes — is in
+  [`assets/TEST_FIXTURES.md`](assets/TEST_FIXTURES.md).
 - **CI** (`azure-pipelines.yml`): Linux builds inside an Alpine+glibc Docker image
   (`linux-build/Dockerfile`), macOS and Windows build with esy 0.5.7;
   `scripts/replaceCommitVersion.js` substitutes `%%COMMIT%%` in `Fastpack/Version.re` before
@@ -701,18 +721,48 @@ with provenance. Error rendering details in §2.4.
 21. **No optional chaining / nullish coalescing.** `FastpackUtil/Parser.re` passes
     `esproposal_optional_chaining: false` and `esproposal_nullish_coalescing: false` to the Flow
     parser — `?.`/`??` in source is a `CannotParseFile` error. Pre-compiling with babel-loader is
-    the only workaround. Enabling the flags is not enough: `Worker.analyze`, `Scope`, and
-    `Printer` all have unhandled/`ie`-raising branches for these nodes.
+    the only workaround. Enabling the flags is not enough: `Worker.analyze` and `Scope` have
+    unhandled branches for these nodes, and while the Printer accepts them, it **silently drops
+    the `?.` optionality** (prints `a?.b` as `a.b` — see §3.6) — a mis-compile, not a crash.
 22. **The Printer only runs on transpiler-modified ASTs** and hard-crashes (`failwith` via
     `Error.ie`) on many node types (see §3.6). A module that parses fine can still kill the build
     if a transpiler touches it and printing then meets an unsupported node — e.g. `new.target`
     inside a class with class properties. When adding transpilers, run the printer's expect tests
     (`FastpackTest/Print.ml`) early.
-23. **Chunk names are ordinal, not hashed.** `Bundle.re:339` names chunks
+23. **Chunk names are ordinal, not hashed.** `Bundle.re:337-340` names chunks
     `string_of_int(length) ++ ".js"` ("1.js", "2.js", …) in discovery order; there is no content
     hashing anywhere in `Bundle`. Long-term caching/cache-busting of chunks must be handled
     outside fastpack (e.g. versioned `--public-path`). Adding/removing a dynamic import can shift
     every later chunk's name.
+24. **`AstMapper` detects "modified" via `Loc.none`** (`AstMapper.re:261-266,480-482,535-537,
+    610-612`): after your `map_*` handler returns, the framework marks the tree modified only if
+    the returned node's location is `Loc.none` (or a statement handler returned ≠ 1 statements).
+    A transpiler that builds a replacement node but reuses a real source `Loc` is **silently
+    ignored** — the original source string is reused and the Printer never runs (§3.5
+    `parsedSource` short-circuit). Always construct new nodes with `Loc.none` (the `AstHelper`
+    constructors do). Conversely, wrapping an unchanged node in a fresh `Loc.none` forces a
+    print + reparse for the whole module.
+25. **Both traversal frameworks have blind spots** — know them before relying on a visitor:
+    `Visit` never descends into the argument of dynamic `import()` (`E.Import(_) => ()`,
+    `Visit.re:234`), into JSX element/fragment interiors (`:323-324`), into
+    `ImportDeclaration`s, or into class decorators/method keys; expressions have no
+    `enter/leave` hooks (only statements, functions, blocks do). `AstMapper` likewise does not
+    map JSX interiors (falls through `| node => node`) — `ReactJSX.re` recurses into children
+    itself — and does not map class decorators (TODO at `AstMapper.re:270`); a statement
+    handler expanding the declaration inside `export`/`export default` to multiple statements
+    is an internal error (`AstMapper.re:230,245`). Mapping is **bottom-up**: children are
+    mapped before your handler sees the (already-rewritten) parent.
+26. **Workspace patcher offset units are inconsistent between read and write.** Patch offsets
+    are Flow-parser symbol offsets, converted to byte offsets only in `Workspace.write` via the
+    per-file `utf8` table (`Workspace.re:104-123`); but `patcher.sub`/`sub_loc`
+    (`Workspace.re:203-206`) do a **byte-indexed** `String.sub` with those same symbol offsets —
+    correct only while every character before the site is ASCII. These two accessors are
+    currently *dead code* (`Worker.analyze` destructures only `patch/patch_loc/patch_loc_with/
+    remove/remove_loc`, `Worker.re:158-166`; `Mode` uses only `remove`+`patch_loc`,
+    `Mode.re:85,145`) — the hazard is latent, waiting for whoever reaches for them on a
+    non-ASCII file. Also note `patcher.patch(start, len, s)` takes a *length*, not an end
+    offset, and the `modify` function (eval-escaping) is applied to unchanged chunks and patch
+    content separately (`Workspace.re:129-146`).
 
 ---
 
@@ -824,11 +874,12 @@ erDiagram
 Cache path: `<dir>/.cache/fpack/cache-<md5(configId)>-<commit>` where `<dir>` =
 `<cwd>/node_modules` if it exists, else `<cwd>`.
 
-### 5.5 Diagrams
+### 5.5 Diagrams & supplemental files
 
 - Component architecture: [`assets/architecture.mmd`](assets/architecture.mmd)
 - Build sequence: [`assets/build-sequence.mmd`](assets/build-sequence.mmd)
 - Scored file index: [`assets/FILE_INDEX.md`](assets/FILE_INDEX.md)
+- Integration-test fixture catalog: [`assets/TEST_FIXTURES.md`](assets/TEST_FIXTURES.md)
 
 ### 5.6 Developer workflow cheat-sheet
 
@@ -842,32 +893,99 @@ make train-integration pattern=pack-simple   # re-record one fixture
 _build/default/bin/fpack.exe --development ./index.js -o ./bundle   # run locally
 ```
 
+### 5.7 AST framework contracts (Visit / AstMapper / Workspace patcher)
+
+These three form the toolkit every analysis or transform is built from; their exact contracts
+(fully read in pass 3) are what you code against when adding a transpiler or visitor.
+
+**`FastpackUtil/Visit.re` — read-only visitor.**
+
+- Handler record: `visit_statement/expression/function/block/pattern` return
+  `Continue(ctx) | Break` (`Break` = don't descend; the node's `leave_*` still fires);
+  `enter_*/leave_*` hooks exist **only** for statements, functions, and blocks — expressions
+  and patterns have none (`Visit.re:13-25`).
+- `ctx.parents` is an `AstParentStack` maintained by the framework; handlers receive it for
+  positional decisions (e.g. `Scope` uses it to distinguish function-level statements).
+- Traversal blind spots (the framework never descends into these — your handler must, if it
+  cares): the argument of dynamic `import()` (`E.Import(_) => ()`, `Visit.re:234`); JSX
+  element/fragment interiors (`:323-324`); everything inside `ImportDeclaration` (`:181`);
+  class decorators and non-computed method keys (`visit_class`, `:197-226`); Flow
+  declare/type statements (all `()`).
+
+**`FastpackUtil/AstMapper.re` — rewriting mapper (used by all four transpilers).**
+
+- Handler record: `map_statement` returns a **list** of statements (expansion allowed);
+  `map_expression/function/pattern` return one node (`AstMapper.re:20-29`).
+- Order is **bottom-up**: children are mapped first, then your handler is called on the node
+  with already-rewritten children (`map_statement` body runs before
+  `ctx.handler.map_statement`, `:61-267`).
+- **Modification signaling**: after the handler returns, the framework marks the tree dirty
+  iff the returned node's loc is `Loc.none`, or a statement handler returned ≠ 1 statements
+  (`:261-266`, `:480-482`, `:535-537`, `:610-612`). Build replacement nodes with `Loc.none`
+  (all `AstHelper` constructors do). The resulting `modified` flag is what decides whether
+  `Printer.print` runs at all (§3.5).
+- Where multiple statements land in a single-statement position (if-branch, loop body), they
+  are wrapped in a `Block` (`to_block_if_many`, `:56-60`) — fine everywhere except inside
+  `export`/`export default`, where a multi-statement expansion is an internal error
+  (`:230`, `:245`).
+- Scope: the framework threads `ctx.scope` via `Scope.of_statement/of_function/of_block` as it
+  descends; class bodies do **not** open a scope; class decorators are not mapped (TODO,
+  `:270`); JSX interiors are not mapped (fall through `| node => node`, `:476`) — `ReactJSX.re`
+  recurses into children itself.
+
+**`Fastpack/Workspace.re` — offset patches over the original source.**
+
+- `make_patcher(ref(workspace))` returns
+  `{patch(start, len, s), patch_with(start, len, ctx=>s), remove(start, len),
+  patch_loc/patch_loc_with/remove_loc(loc, …), sub(start, len), sub_loc(loc)}`
+  (`Workspace.re:28-37,174-217`). Second argument of the offset forms is a **length**.
+- `write ~modify` sorts patches by `(start, zero-length-first, longer-first, insertion order)`,
+  drops a patch fully contained in the previous one, hard-errors on partial overlap
+  ("Unexpected patch combination", `:59-98`), builds the symbol→byte `utf8` table, and streams
+  chunks through `modify` (in `Worker` this is `to_eval` JSON-escaping) — unchanged chunks and
+  patch outputs are escaped separately (`:124-156`).
+- `sub`/`sub_loc` are byte-indexed while patch application is symbol-indexed — currently
+  unused in production code; see gotcha #26 before using them.
+- `to_string` (used in tests) applies patches naively in insertion order without the
+  sort/fold — it assumes non-overlapping, ordered patches.
+
 ---
 
 ## 6. STATE BLOCK
 
 ```
-INDEX_VERSION: 2 (commit 173e0a4, 2026-08-21; pass 2 closed Printer/transpiler-body gaps)
+INDEX_VERSION: 3 (code commit 173e0a4 / repo head 23b29a3 which is docs-only, 2026-08-21;
+  pass 3 read Printer emit bodies, Visit/AstMapper/Workspace in full, cataloged test fixtures)
 FILE_MAP_SUMMARY: see assets/FILE_INDEX.md (50 entries, priorities A-D)
-COVERAGE: all Fastpack/*.re read in full; FastpackUtil Scope/Workspace/Process/FS/Parser/
-  Visit(head)/AstMapper(head)/helpers read; Printer.re structure, precedence table,
-  scope-printing and unsupported-node inventory read (§3.6); FastpackTranspiler driver +
-  all four transpilers incl. ObjectSpread spread/rest algorithms and error sites read;
-  node-service, scripts, dist, CI configs read. NOT read line-by-line: Printer.re
-  emit bodies between :340-1442 (mechanical Buffer emission), esy.lock vendor metadata,
-  test fixture snapshots.
+COVERAGE: all Fastpack/*.re read in full (incl. Workspace.re); FastpackUtil
+  Scope/Process/FS/Parser/UTF8/helpers read; Visit.re, AstMapper.re, Printer.re read in FULL
+  (contracts in §5.7; corrected unsupported-node inventory in §3.6); FastpackTranspiler driver
+  + all four transpilers read; node-service, scripts, dist, CI configs read; integration
+  fixture inventory verified on disk (assets/TEST_FIXTURES.md). NOT read line-by-line:
+  esy.lock vendor metadata, test fixture snapshot contents (dev/ directories).
 OPEN_QUESTIONS:
   - Is production mode planned to reuse Mode.patch_* with real tree-shaking? (TODO.md hints;
     Worker hardcodes Development.)
 RESOLVED (pass 2):
-  - Chunk naming: confirmed purely ordinal, "<n>.js" from Bundle.re:339; no hashing exists;
+  - Chunk naming: confirmed purely ordinal, "<n>.js" from Bundle.re:337-340; no hashing;
     cache-busting is the consumer's problem (gotcha #23).
   - loader-runner version: dist/package.json (the published npm package "fastpack" 0.9.2)
     pins ^3.0.0 — that is what end users run; the root package.json's ^2.3.1 only serves
     the in-repo node-service during development/tests.
+RESOLVED (pass 3):
+  - Printer inventory corrected: `??` prints fine; OptionalCall/OptionalMember print but
+    silently DROP `?.`; JSX Fragment crashes only in child position (§3.6, gotchas #21-22).
+  - AstMapper modification-detection contract: Loc.none convention (gotcha #24, §5.7).
+  - Visit/AstMapper traversal blind spots documented (gotcha #25, §5.7).
+  - patcher.sub/sub_loc byte-vs-symbol asymmetry: confirmed DEAD CODE today (Worker and Mode
+    destructure only patch*/remove*), latent hazard only (gotcha #26).
+  - Several test fixtures are legacy-only and never run by scripts/test.js
+    (assets/TEST_FIXTURES.md); pack-builtins actually tests the builtin transpiler, not
+    node builtins.
 KNOWN_RISKS:
   - Marshal-format coupling (gotcha #2); mtime-based freshness (#3); eval-escaping (#8);
-    printer crashes on unsupported nodes when transpilers modify an AST (#22).
+    printer crashes on unsupported nodes when transpilers modify an AST (#22); silent
+    drop of a transform when a transpiler forgets Loc.none (#24).
 GLOSSARY_DELTA: none pending — §5.1 is current.
 ```
 
@@ -880,6 +998,9 @@ GLOSSARY_DELTA: none pending — §5.1 is current.
 | 3 | `Printer.re` faithfully prints the Flow AST subset produced by the transpilers; transpiler bugs would surface in `test/transpile-*` snapshots. | High |
 | 4 | Watch-mode correctness relies on watchman reporting paths under the subscribed root only; no fallback watcher exists. | High |
 
-**Next steps for a future analyst**: the remaining unread region is `Printer.re:340-1442`
-(mechanical emit bodies — consult before changing any transpiler's output shape); run
-`make test-integration` early — the snapshot suite is the real spec of emitted-bundle format.
+**Next steps for a future analyst**: source coverage is complete as of pass 3 — every
+non-vendored `.re`/`.ml`/`.js` backbone file has been read. What remains unexamined is data,
+not code: the committed snapshot contents under `test/*/dev/` (the de-facto spec of the
+emitted bundle format — diff them when changing emission) and `esy.lock` vendor metadata.
+Run `make test-integration` early when making changes; re-record intentional output changes
+with `make train-integration pattern=<fixture>`.
