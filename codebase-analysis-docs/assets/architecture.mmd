@@ -1,0 +1,19 @@
+%% Fastpack — top-level component architecture
+%% Render with any Mermaid-compatible viewer.
+flowchart TD
+    CLI["bin/fpack.re<br/>(Cmdliner CLI)"] --> CMDS["Fastpack/Commands.re<br/>build | watch | transpile | worker | explain-config"]
+    CMDS --> CFG["Fastpack/Config.re<br/>CLI args + fastpack.json"]
+    CMDS --> BLD["Fastpack/Builder.re<br/>orchestrates a build"]
+    BLD --> CACHE["Fastpack/Cache.re + FSCache.re<br/>persistent module & FS cache"]
+    BLD --> GRAPH["Fastpack/DependencyGraph.re<br/>module discovery (async BFS)"]
+    GRAPH --> RES["Fastpack/Resolver.re<br/>node-style resolution,<br/>browser field, mocks"]
+    GRAPH --> READER["Worker.Reader<br/>Lwt_pool of fpack worker subprocesses"]
+    READER -->|"OCaml Marshal over pipes"| WORKER["fpack worker subprocess<br/>Fastpack/Worker.re"]
+    WORKER --> PP["Fastpack/Preprocessor.re<br/>preprocessor chain"]
+    PP --> BUILTIN["FastpackTranspiler<br/>JSX, Flow, Class, ObjectSpread"]
+    PP -->|"JSON lines over pipes"| NODE["node-service/index.js<br/>webpack loaders via loader-runner"]
+    WORKER --> ANALYZE["Worker.analyze<br/>ESM/CJS → __fastpack_require__<br/>(Workspace patches)"]
+    BLD --> EF["Fastpack/ExportFinder.re<br/>validate imported names"]
+    BLD --> BUNDLE["Fastpack/Bundle.re<br/>chunking + emit + JS runtime"]
+    BUNDLE --> OUT[("bundle/index.js + chunks<br/>+ emitted asset files")]
+    CMDS --> WM["watchman subprocess<br/>(watch mode only)"]
