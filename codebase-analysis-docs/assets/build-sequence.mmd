@@ -1,0 +1,38 @@
+%% Fastpack — sequence of a single `fpack build --development` run
+sequenceDiagram
+    participant U as User (CLI)
+    participant C as Commands.Build
+    participant B as Builder
+    participant G as DependencyGraph
+    participant R as Resolver
+    participant W as Worker pool (N=CPUs)
+    participant N as node-service (webpack loaders)
+    participant K as Cache/FSCache
+    participant O as Bundle
+
+    U->>C: fpack build --development
+    C->>B: Config.term → Builder.make(config)
+    B->>K: Cache.make(Load{...}) — load persistent cache if present
+    B->>B: create tmp output dir .fpack-<rand>
+    C->>B: Builder.build()
+    B->>G: DependencyGraph.build(ctx, Main(entries), graph)
+    loop per module (async, memoized via Lazy promises)
+        G->>K: Cache.getModule(location)? (skip worker if fresh)
+        G->>W: Reader.read(location, source) [Marshal request]
+        W->>W: Preprocessor.run (chain)
+        opt webpack loaders configured
+            W->>N: JSON {loaders, filename, source}
+            N-->>W: {source, deps, warnings, files}
+        end
+        W->>W: builtin transpilers + analyze (patch to __fastpack_require__)
+        W-->>G: {source, static/dynamic deps, scope, exports, module_type}
+        G->>R: resolve each dependency request
+        R->>K: FSCache stat/read/readdir (+case-sensitivity check)
+        G->>G: recurse into unseen resolved locations
+    end
+    B->>B: ExportFinder.ensure_exports (import name validation)
+    B->>O: Bundle.make(graph, entry) — chunk by dynamic imports
+    B->>O: Bundle.emit — write runtime + eval-wrapped modules to tmp dir
+    O->>O: rename tmp dir → outputDir (atomic swap)
+    C->>K: Cache.save (Marshal to node_modules/.cache/fpack)
+    C-->>U: "Done in Xs. Bundle: NKb. Modules: M."
