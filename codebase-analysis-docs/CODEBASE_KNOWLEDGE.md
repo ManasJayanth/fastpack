@@ -455,6 +455,38 @@ statement) is prepended and the `Runtime` pseudo-module joins the graph.
   Computed keys / private names raise `TranspilerError`.
 - **`ObjectSpread.re`** — `{...a, b}` → `Object.assign({}, a, {b})`; object **rest** patterns in
   destructuring/params/for-of → generated temp bindings + `$fp$runtime.omitProps(target, [names])`.
+  - Spread algorithm (`TranspileObjectSpread.transpile`, `ObjectSpread.re:118-142`): properties are
+    folded left-to-right into "buckets" of consecutive plain properties; each bucket becomes one
+    object-literal argument and each spread becomes its own argument, all passed to
+    `Object.assign({}, …)` in source order (`Helper.object_assign` prepends the fresh `{}` target).
+  - Rest handling (`TranspileObjectSpreadRest`, `:145-891`) rewrites destructuring in variable
+    declarations, function parameters, and `for-in`/`for-of` heads. `TranspilerError` sites:
+    a computed rest-sibling key that is not a plain identifier (`:279`,
+    "Unexpected non-identifier Object.Property.Computed"), and a `for-in`/`for-of` left side with
+    more than one declaration (`:719`, `:884`).
+
+**Parser options** (`FastpackUtil/Parser.re`): the Flow parser is invoked with
+`esproposal_class_instance_fields/static_fields/decorators/export_star_as = true` but
+`esproposal_nullish_coalescing = false` and `esproposal_optional_chaining = false` — source using
+`??` or `?.` fails to parse at all (`CannotParseFile`), which also means the Printer's
+"not supported" branches for those nodes are unreachable from real input.
+
+**The AST printer** (`FastpackUtil/Printer.re`, 1442 lines) — used only when a builtin transpiler
+actually modified the AST (otherwise the original source string is reused, §3.5):
+
+- `print(~with_scope=false, ast)` walks statements building a `Buffer`, tracking indentation, a
+  parent stack (`AstParentStack`), and the current `Scope`; `~with_scope=true` additionally emits
+  `/* SCOPE: … */` comments at each scope boundary — a debug facility exercised by
+  `FastpackTest/PrintWithScope.ml`, never used in production emission.
+- Parenthesization uses an explicit precedence table (`Printer.Parens.precedence`, `:49-120`,
+  adapted from the MDN operator-precedence table with documented tweaks: arrow functions bind
+  loosest, sequences always parenthesized, function expressions rank 18 to allow IIFEs).
+- **Unsupported nodes raise an internal error** (`ie(…)` → `Error.ie`, a `failwith`):
+  nullish coalescing, optional call/member, generators/comprehensions, `TypeCast`, `MetaProperty`
+  (`new.target`), JSX `Fragment`/`SpreadChild` (in some positions), class `PrivateField`, and all
+  Flow `declare`/`interface`/`type`-alias statements (`:708-721`) — the latter are normally removed
+  by `StripFlow` before printing. Practical consequence: if you add a transpiler (or reorder the
+  pipeline so `StripFlow` doesn't run first), the printer is the component most likely to crash.
 
 ### 3.7 Caching (two layers)
 
@@ -666,6 +698,21 @@ with provenance. Error rendering details in §2.4.
     of large modules; don't remove.
 20. **Version/commit stamping**: `scripts/bump_version.js` and `replaceCommitVersion.js`
       rewrite `Fastpack/Version.re` and `dist/package.json`. Cache-compat (#2) depends on it.
+21. **No optional chaining / nullish coalescing.** `FastpackUtil/Parser.re` passes
+    `esproposal_optional_chaining: false` and `esproposal_nullish_coalescing: false` to the Flow
+    parser — `?.`/`??` in source is a `CannotParseFile` error. Pre-compiling with babel-loader is
+    the only workaround. Enabling the flags is not enough: `Worker.analyze`, `Scope`, and
+    `Printer` all have unhandled/`ie`-raising branches for these nodes.
+22. **The Printer only runs on transpiler-modified ASTs** and hard-crashes (`failwith` via
+    `Error.ie`) on many node types (see §3.6). A module that parses fine can still kill the build
+    if a transpiler touches it and printing then meets an unsupported node — e.g. `new.target`
+    inside a class with class properties. When adding transpilers, run the printer's expect tests
+    (`FastpackTest/Print.ml`) early.
+23. **Chunk names are ordinal, not hashed.** `Bundle.re:339` names chunks
+    `string_of_int(length) ++ ".js"` ("1.js", "2.js", …) in discovery order; there is no content
+    hashing anywhere in `Bundle`. Long-term caching/cache-busting of chunks must be handled
+    outside fastpack (e.g. versioned `--public-path`). Adding/removing a dynamic import can shift
+    every later chunk's name.
 
 ---
 
@@ -800,23 +847,27 @@ _build/default/bin/fpack.exe --development ./index.js -o ./bundle   # run locall
 ## 6. STATE BLOCK
 
 ```
-INDEX_VERSION: 1 (commit 173e0a4, 2026-08-21)
+INDEX_VERSION: 2 (commit 173e0a4, 2026-08-21; pass 2 closed Printer/transpiler-body gaps)
 FILE_MAP_SUMMARY: see assets/FILE_INDEX.md (50 entries, priorities A-D)
 COVERAGE: all Fastpack/*.re read in full; FastpackUtil Scope/Workspace/Process/FS/Parser/
-  Visit(head)/AstMapper(head)/helpers read; FastpackTranspiler driver + all four transpiler
-  heads read; node-service, scripts, dist, CI configs read. NOT read line-by-line:
-  FastpackUtil/Printer.re (1442 ln, AST printer — behavioral role documented),
-  bodies of ReactJSX/Class/ObjectSpread beyond their transform entry logic,
-  esy.lock vendor metadata, test fixture snapshots.
+  Visit(head)/AstMapper(head)/helpers read; Printer.re structure, precedence table,
+  scope-printing and unsupported-node inventory read (§3.6); FastpackTranspiler driver +
+  all four transpilers incl. ObjectSpread spread/rest algorithms and error sites read;
+  node-service, scripts, dist, CI configs read. NOT read line-by-line: Printer.re
+  emit bodies between :340-1442 (mechanical Buffer emission), esy.lock vendor metadata,
+  test fixture snapshots.
 OPEN_QUESTIONS:
   - Is production mode planned to reuse Mode.patch_* with real tree-shaking? (TODO.md hints;
     Worker hardcodes Development.)
-  - Why is chunk naming purely ordinal ("1.js") with no content hash — cache-busting is
-    left to publicPath? (No hashing found anywhere in Bundle.)
-  - dist/package.json pins loader-runner ^3 while root pins ^2 — which one the published
-    package actually used at runtime depends on install layout.
+RESOLVED (pass 2):
+  - Chunk naming: confirmed purely ordinal, "<n>.js" from Bundle.re:339; no hashing exists;
+    cache-busting is the consumer's problem (gotcha #23).
+  - loader-runner version: dist/package.json (the published npm package "fastpack" 0.9.2)
+    pins ^3.0.0 — that is what end users run; the root package.json's ^2.3.1 only serves
+    the in-repo node-service during development/tests.
 KNOWN_RISKS:
-  - Marshal-format coupling (gotcha #2); mtime-based freshness (#3); eval-escaping (#8).
+  - Marshal-format coupling (gotcha #2); mtime-based freshness (#3); eval-escaping (#8);
+    printer crashes on unsupported nodes when transpilers modify an AST (#22).
 GLOSSARY_DELTA: none pending — §5.1 is current.
 ```
 
@@ -825,10 +876,10 @@ GLOSSARY_DELTA: none pending — §5.1 is current.
 | # | Assumption | Confidence |
 |---|---|---|
 | 1 | `@fastpack/flow_parser` is a straight fork of Flow 0.81's parser with fastpack packaging; AST shapes match upstream Flow 0.81. | High (naming + `Flow_parser.Flow_ast` usage) |
-| 2 | The npm-published binary consumed `dist/node-service` copied from `node-service/` at release time (script not found in repo; `dist/node-service/index.js` exists). | Medium |
+| 2 | ~~Assumption~~ **Confirmed**: `azure-pipelines.yml:128` (`cp -R node-service README.md dist`) copies `node-service/` into the npm package at release. The `dist/node-service/index.js` committed in-repo is a *stale older copy* (it lacks the `FASTPACK_PARENT_PID` watchdog and `emitWarning`/`emitError`) — never edit it; `node-service/index.js` is the source of truth. | High |
 | 3 | `Printer.re` faithfully prints the Flow AST subset produced by the transpilers; transpiler bugs would surface in `test/transpile-*` snapshots. | High |
 | 4 | Watch-mode correctness relies on watchman reporting paths under the subscribed root only; no fallback watcher exists. | High |
 
-**Next steps for a future analyst**: read `FastpackUtil/Printer.re` before touching transpiler
-output; read `ObjectSpread.re` in full before changing pattern handling; run
+**Next steps for a future analyst**: the remaining unread region is `Printer.re:340-1442`
+(mechanical emit bodies — consult before changing any transpiler's output shape); run
 `make test-integration` early — the snapshot suite is the real spec of emitted-bundle format.
